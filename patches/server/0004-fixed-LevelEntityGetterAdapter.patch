@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Katzen48 | Tobi <Katzen48@freenet.de>
+Date: Mon, 16 Oct 2023 23:36:34 +0200
+Subject: [PATCH] fixed LevelEntityGetterAdapter
+
+
+diff --git a/src/main/java/net/minecraft/world/level/entity/LevelEntityGetterAdapter.java b/src/main/java/net/minecraft/world/level/entity/LevelEntityGetterAdapter.java
+index 306e072cf799f443da2f3b96e811642689a1fcad..5832935f5ca722ad31a8b3cdc2467b546b10f100 100644
+--- a/src/main/java/net/minecraft/world/level/entity/LevelEntityGetterAdapter.java
++++ b/src/main/java/net/minecraft/world/level/entity/LevelEntityGetterAdapter.java
+@@ -4,6 +4,7 @@ import java.util.UUID;
+ import java.util.function.Consumer;
+ import javax.annotation.Nullable;
+ import net.minecraft.util.AbortableIterationConsumer;
++import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.phys.AABB;
+ 
+ public class LevelEntityGetterAdapter<T extends EntityAccess> implements LevelEntityGetter<T> {
+@@ -46,4 +47,21 @@ public class LevelEntityGetterAdapter<T extends EntityAccess> implements LevelEn
+     public <U extends T> void get(EntityTypeTest<T, U> filter, AABB box, AbortableIterationConsumer<U> consumer) {
+         this.sectionStorage.getEntities(filter, box, consumer);
+     }
++
++    // ForkTest start
++    @Override
++    public <U extends T> void get(EntityTypeTest<T, U> filter, AbortableIterationConsumer<U> consumer, String tag) {
++        this.get(filter, consumer);
++    }
++
++    @Override
++    public void addTag(Entity entity, String tag) {
++
++    }
++
++    @Override
++    public void removeTag(Entity entity, String tag) {
++
++    }
++    // ForkTest end
+ }
