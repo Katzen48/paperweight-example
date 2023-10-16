@@ -1,0 +1,524 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Katzen48 | Tobi <Katzen48@freenet.de>
+Date: Mon, 16 Oct 2023 23:25:33 +0200
+Subject: [PATCH] add entities to list
+
+
+diff --git a/src/main/java/io/papermc/paper/chunk/system/entity/EntityLookup.java b/src/main/java/io/papermc/paper/chunk/system/entity/EntityLookup.java
+index 58d8c070d649b204b362b674d3d9cf06a44a753b..10f348075980dfb0efec4ad0e28fb30c63f28c33 100644
+--- a/src/main/java/io/papermc/paper/chunk/system/entity/EntityLookup.java
++++ b/src/main/java/io/papermc/paper/chunk/system/entity/EntityLookup.java
+@@ -216,6 +216,27 @@ public final class EntityLookup implements LevelEntityGetter<Entity> {
+         }
+     }
+ 
++    // ForkTest start
++    @Override
++    public <U extends Entity> void get(final EntityTypeTest<Entity, U> filter, final AbortableIterationConsumer<U> action, @Nullable String tag) {
++        if (tag == null) {
++            get(filter, action);
++            return;
++        }
++
++        for (final Entity entity : this.entitiesByTag.get(tag)) {
++            final Visibility visibility = EntityLookup.getEntityStatus(entity);
++            if (!visibility.isAccessible()) {
++                continue;
++            }
++            final U casted = filter.tryCast(entity);
++            if (casted != null && action.accept(casted).shouldAbort()) {
++                break;
++            }
++        }
++    }
++    // ForkTest end
++
+     @Override
+     public void get(final AABB box, final Consumer<Entity> action) {
+         List<Entity> entities = new ArrayList<>();
+@@ -416,6 +437,11 @@ public final class EntityLookup implements LevelEntityGetter<Entity> {
+             }
+             this.entityById.put(entity.getId(), entity);
+             this.entityByUUID.put(entity.getUUID(), entity);
++            // ForkTest start
++            for (String tag : entity.getTags()) {
++                this.entitiesByTag.put(tag, entity);
++            }
++            // ForkTest end
+         } finally {
+             this.entityByLock.tryUnlockWrite();
+         }
+@@ -435,6 +461,18 @@ public final class EntityLookup implements LevelEntityGetter<Entity> {
+         return true;
+     }
+ 
++    // ForkTest start
++    @Override
++    public void addTag(Entity entity, String tag) {
++        this.entitiesByTag.put(tag, entity);
++    }
++
++    @Override
++    public void removeTag(Entity entity, String tag) {
++        this.entitiesByTag.remove(tag, entity);
++    }
++    // ForkTest end
++
+     public boolean canRemoveEntity(final Entity entity) {
+         if (entity.updatingSectionStatus) {
+             return false;
+@@ -476,6 +514,19 @@ public final class EntityLookup implements LevelEntityGetter<Entity> {
+             if (!this.entityByUUID.remove(entity.getUUID(), entity)) {
+                 LOGGER.warn("Failed to remove entity " + entity + " by uuid, current entity mapped: " + this.entityByUUID.get(entity.getUUID()));
+             }
++            // ForkTest start
++            for (String tag : entity.getTags()) {
++                if (!this.entitiesByTag.remove(tag, entity)) {
++                    LOGGER.warn("Failed to remove entity " + entity + " by tag " + tag);
++                }
++            }
++            for (String tag : entitiesByTag.keySet()) {
++                if (entitiesByTag.containsEntry(tag, entity)) {
++                    entitiesByTag.remove(tag, entity);
++                    LOGGER.warn("Mapped entity removed by tag " + tag);
++                }
++            }
++            // ForkTest end
+         } finally {
+             this.entityByLock.tryUnlockWrite();
+         }
+@@ -675,6 +726,142 @@ public final class EntityLookup implements LevelEntityGetter<Entity> {
+         }
+     }
+ 
++    // ForkTest start
++    public void getEntities(final Entity except, final AABB box, final List<Entity> into, final Predicate<? super Entity> predicate, @Nullable String tag) {
++        if (tag == null) {
++            getEntities(except, box, into, predicate);
++            return;
++        }
++
++        final int minChunkX = (Mth.floor(box.minX) - 2) >> 4;
++        final int minChunkZ = (Mth.floor(box.minZ) - 2) >> 4;
++        final int maxChunkX = (Mth.floor(box.maxX) + 2) >> 4;
++        final int maxChunkZ = (Mth.floor(box.maxZ) + 2) >> 4;
++
++        final int minRegionX = minChunkX >> REGION_SHIFT;
++        final int minRegionZ = minChunkZ >> REGION_SHIFT;
++        final int maxRegionX = maxChunkX >> REGION_SHIFT;
++        final int maxRegionZ = maxChunkZ >> REGION_SHIFT;
++
++        for (int currRegionZ = minRegionZ; currRegionZ <= maxRegionZ; ++currRegionZ) {
++            final int minZ = currRegionZ == minRegionZ ? minChunkZ & REGION_MASK : 0;
++            final int maxZ = currRegionZ == maxRegionZ ? maxChunkZ & REGION_MASK : REGION_MASK;
++
++            for (int currRegionX = minRegionX; currRegionX <= maxRegionX; ++currRegionX) {
++                final ChunkSlicesRegion region = this.getRegion(currRegionX, currRegionZ);
++
++                if (region == null) {
++                    continue;
++                }
++
++                final int minX = currRegionX == minRegionX ? minChunkX & REGION_MASK : 0;
++                final int maxX = currRegionX == maxRegionX ? maxChunkX & REGION_MASK : REGION_MASK;
++
++                for (int currZ = minZ; currZ <= maxZ; ++currZ) {
++                    for (int currX = minX; currX <= maxX; ++currX) {
++                        final ChunkEntitySlices chunk = region.get(currX | (currZ << REGION_SHIFT));
++                        if (chunk == null || !chunk.status.isOrAfter(FullChunkStatus.FULL)) {
++                            continue;
++                        }
++
++                        chunk.getEntities(except, box, into, predicate);
++                    }
++                }
++            }
++        }
++    }
++
++    public <T extends Entity> void getEntities(final EntityType<?> type, final AABB box, final List<? super T> into,
++                                               final Predicate<? super T> predicate, @Nullable String tag) {
++        if (tag == null) {
++            getEntities(type, box, into, predicate);
++            return;
++        }
++
++        final int minChunkX = (Mth.floor(box.minX) - 2) >> 4;
++        final int minChunkZ = (Mth.floor(box.minZ) - 2) >> 4;
++        final int maxChunkX = (Mth.floor(box.maxX) + 2) >> 4;
++        final int maxChunkZ = (Mth.floor(box.maxZ) + 2) >> 4;
++
++        final int minRegionX = minChunkX >> REGION_SHIFT;
++        final int minRegionZ = minChunkZ >> REGION_SHIFT;
++        final int maxRegionX = maxChunkX >> REGION_SHIFT;
++        final int maxRegionZ = maxChunkZ >> REGION_SHIFT;
++
++        for (int currRegionZ = minRegionZ; currRegionZ <= maxRegionZ; ++currRegionZ) {
++            final int minZ = currRegionZ == minRegionZ ? minChunkZ & REGION_MASK : 0;
++            final int maxZ = currRegionZ == maxRegionZ ? maxChunkZ & REGION_MASK : REGION_MASK;
++
++            for (int currRegionX = minRegionX; currRegionX <= maxRegionX; ++currRegionX) {
++                final ChunkSlicesRegion region = this.getRegion(currRegionX, currRegionZ);
++
++                if (region == null) {
++                    continue;
++                }
++
++                final int minX = currRegionX == minRegionX ? minChunkX & REGION_MASK : 0;
++                final int maxX = currRegionX == maxRegionX ? maxChunkX & REGION_MASK : REGION_MASK;
++
++                for (int currZ = minZ; currZ <= maxZ; ++currZ) {
++                    for (int currX = minX; currX <= maxX; ++currX) {
++                        final ChunkEntitySlices chunk = region.get(currX | (currZ << REGION_SHIFT));
++                        if (chunk == null || !chunk.status.isOrAfter(FullChunkStatus.FULL)) {
++                            continue;
++                        }
++
++                        chunk.getEntities(type, box, (List)into, (Predicate)predicate);
++                    }
++                }
++            }
++        }
++    }
++
++    public <T extends Entity> void getEntities(final Class<? extends T> clazz, final Entity except, final AABB box, final List<? super T> into,
++                                               final Predicate<? super T> predicate, @Nullable String tag) {
++        if (tag == null) {
++            getEntities(clazz, except, box, into, predicate);
++            return;
++        }
++
++        final int minChunkX = (Mth.floor(box.minX) - 2) >> 4;
++        final int minChunkZ = (Mth.floor(box.minZ) - 2) >> 4;
++        final int maxChunkX = (Mth.floor(box.maxX) + 2) >> 4;
++        final int maxChunkZ = (Mth.floor(box.maxZ) + 2) >> 4;
++
++        final int minRegionX = minChunkX >> REGION_SHIFT;
++        final int minRegionZ = minChunkZ >> REGION_SHIFT;
++        final int maxRegionX = maxChunkX >> REGION_SHIFT;
++        final int maxRegionZ = maxChunkZ >> REGION_SHIFT;
++
++        for (int currRegionZ = minRegionZ; currRegionZ <= maxRegionZ; ++currRegionZ) {
++            final int minZ = currRegionZ == minRegionZ ? minChunkZ & REGION_MASK : 0;
++            final int maxZ = currRegionZ == maxRegionZ ? maxChunkZ & REGION_MASK : REGION_MASK;
++
++            for (int currRegionX = minRegionX; currRegionX <= maxRegionX; ++currRegionX) {
++                final ChunkSlicesRegion region = this.getRegion(currRegionX, currRegionZ);
++
++                if (region == null) {
++                    continue;
++                }
++
++                final int minX = currRegionX == minRegionX ? minChunkX & REGION_MASK : 0;
++                final int maxX = currRegionX == maxRegionX ? maxChunkX & REGION_MASK : REGION_MASK;
++
++                for (int currZ = minZ; currZ <= maxZ; ++currZ) {
++                    for (int currX = minX; currX <= maxX; ++currX) {
++                        final ChunkEntitySlices chunk = region.get(currX | (currZ << REGION_SHIFT));
++                        if (chunk == null || !chunk.status.isOrAfter(FullChunkStatus.FULL)) {
++                            continue;
++                        }
++
++                        chunk.getEntities(clazz, except, box, into, predicate);
++                    }
++                }
++            }
++        }
++    }
++    // ForkTest end
++
+     public <T extends Entity> void getEntities(final Class<? extends T> clazz, final Entity except, final AABB box, final List<? super T> into,
+                                                final Predicate<? super T> predicate) {
+         final int minChunkX = (Mth.floor(box.minX) - 2) >> 4;
+diff --git a/src/main/java/net/minecraft/commands/arguments/selector/EntitySelector.java b/src/main/java/net/minecraft/commands/arguments/selector/EntitySelector.java
+index 73c15a0c56a103ba4e62f0a51af8d42566b07245..9bc36d97297cbf01fcca98f98ccf5e5a86e8b810 100644
+--- a/src/main/java/net/minecraft/commands/arguments/selector/EntitySelector.java
++++ b/src/main/java/net/minecraft/commands/arguments/selector/EntitySelector.java
+@@ -54,8 +54,33 @@ public class EntitySelector {
+     private final UUID entityUUID;
+     private final EntityTypeTest<Entity, ?> type;
+     private final boolean usesSelector;
++    // ForkTest start
++    @Nullable
++    private final String tag;
++    // ForkTest end
+ 
+     public EntitySelector(int count, boolean includesNonPlayers, boolean localWorldOnly, Predicate<Entity> basePredicate, MinMaxBounds.Doubles distance, Function<Vec3, Vec3> positionOffset, @Nullable AABB box, BiConsumer<Vec3, List<? extends Entity>> sorter, boolean senderOnly, @Nullable String playerName, @Nullable UUID uuid, @Nullable EntityType<?> type, boolean usesAt) {
++        // ForkTest start
++        //this.maxResults = count;
++        //this.includesEntities = includesNonPlayers;
++        //this.worldLimited = localWorldOnly;
++        //this.predicate = basePredicate;
++        //this.range = distance;
++        //this.position = positionOffset;
++        //this.aabb = box;
++        //this.order = sorter;
++        //this.currentEntity = senderOnly;
++        //this.playerName = playerName;
++        //this.entityUUID = uuid;
++        //this.type = (EntityTypeTest) (type == null ? EntitySelector.ANY_TYPE : type);
++        //this.usesSelector = usesAt;
++
++        this(count, includesNonPlayers, localWorldOnly, basePredicate, distance, positionOffset, box, sorter, senderOnly, playerName, uuid, type, usesAt, null);
++        // ForkTest end
++    }
++
++    // ForkTest start
++    public EntitySelector(int count, boolean includesNonPlayers, boolean localWorldOnly, Predicate<Entity> basePredicate, MinMaxBounds.Doubles distance, Function<Vec3, Vec3> positionOffset, @Nullable AABB box, BiConsumer<Vec3, List<? extends Entity>> sorter, boolean senderOnly, @Nullable String playerName, @Nullable UUID uuid, @Nullable EntityType<?> type, boolean usesAt, @Nullable String tag) {
+         this.maxResults = count;
+         this.includesEntities = includesNonPlayers;
+         this.worldLimited = localWorldOnly;
+@@ -69,7 +94,9 @@ public class EntitySelector {
+         this.entityUUID = uuid;
+         this.type = (EntityTypeTest) (type == null ? EntitySelector.ANY_TYPE : type);
+         this.usesSelector = usesAt;
++        this.tag = tag;
+     }
++    // ForkTest end
+ 
+     public int getMaxResults() {
+         return this.maxResults;
+@@ -150,14 +177,20 @@ public class EntitySelector {
+                 List<Entity> list = Lists.newArrayList();
+ 
+                 if (this.isWorldLimited()) {
+-                    this.addEntities(list, source.getLevel(), vec3d, predicate);
++                    // ForkTest start
++                    //this.addEntities(list, source.getLevel(), vec3d, predicate);
++                    this.addEntities(list, source.getLevel(), vec3d, predicate, this.tag);
++                    // ForkTest end
+                 } else {
+                     Iterator iterator1 = source.getServer().getAllLevels().iterator();
+ 
+                     while (iterator1.hasNext()) {
+                         ServerLevel worldserver1 = (ServerLevel) iterator1.next();
+ 
+-                        this.addEntities(list, worldserver1, vec3d, predicate);
++                        // ForkTest start
++                        //this.addEntities(list, worldserver1, vec3d, predicate);
++                        this.addEntities(list, worldserver1, vec3d, predicate, this.tag);
++                        // ForkTest end
+                     }
+                 }
+ 
+@@ -166,6 +199,21 @@ public class EntitySelector {
+         }
+     }
+ 
++    // ForkTest start
++    private void addEntities(List<Entity> entities, ServerLevel world, Vec3 pos, Predicate<Entity> predicate, @Nullable String tag) {
++        int i = this.getResultLimit();
++
++        if (entities.size() < i) {
++            if (this.aabb != null) {
++                world.getEntities(this.type, this.aabb.move(pos), predicate, entities, i, tag);
++            } else {
++                world.getEntities(this.type, predicate, entities, i, tag);
++            }
++
++        }
++    }
++    // ForkTest end
++
+     private void addEntities(List<Entity> entities, ServerLevel world, Vec3 pos, Predicate<Entity> predicate) {
+         int i = this.getResultLimit();
+ 
+diff --git a/src/main/java/net/minecraft/commands/arguments/selector/EntitySelectorParser.java b/src/main/java/net/minecraft/commands/arguments/selector/EntitySelectorParser.java
+index 799f34d1ddb6c504329637a5171d06a999c57c13..f0262277990af9310cf3c6a27948f424a73a36f0 100644
+--- a/src/main/java/net/minecraft/commands/arguments/selector/EntitySelectorParser.java
++++ b/src/main/java/net/minecraft/commands/arguments/selector/EntitySelectorParser.java
+@@ -114,6 +114,10 @@ public class EntitySelectorParser {
+     private boolean hasAdvancements;
+     private boolean usesSelectors;
+     public boolean parsingEntityArgumentSuggestions; // Paper - track when parsing EntityArgument suggestions
++    // ForkTest start
++    @Nullable
++    private String tag;
++    // ForkTest end
+ 
+     public EntitySelectorParser(StringReader reader) {
+         this(reader, true);
+@@ -166,7 +170,10 @@ public class EntitySelectorParser {
+             };
+         }
+ 
+-        return new EntitySelector(this.maxResults, this.includesEntities, this.worldLimited, this.predicate, this.distance, function, axisalignedbb, this.order, this.currentEntity, this.playerName, this.entityUUID, this.type, this.usesSelectors);
++        // ForkTest start
++        //return new EntitySelector(this.maxResults, this.includesEntities, this.worldLimited, this.predicate, this.distance, function, axisalignedbb, this.order, this.currentEntity, this.playerName, this.entityUUID, this.type, this.usesSelectors);
++        return new EntitySelector(this.maxResults, this.includesEntities, this.worldLimited, this.predicate, this.distance, function, axisalignedbb, this.order, this.currentEntity, this.playerName, this.entityUUID, this.type, this.usesSelectors, this.tag);
++        // ForkTest end
+     }
+ 
+     private AABB createAabb(double x, double y, double z) {
+@@ -307,7 +314,21 @@ public class EntitySelectorParser {
+                 this.reader.skip();
+                 this.reader.skipWhitespace();
+                 this.suggestions = EntitySelectorParser.SUGGEST_NOTHING;
+-                playerselector_a.handle(this);
++                // ForkTest start
++                //playerselector_a.handle(this);
++
++                boolean readTag = false;
++                if ("tag".equals(s)) {
++                    if (this.tag == null && this.reader.canRead() && this.reader.peek(1) != '!') {
++                        this.tag = this.getReader().readUnquotedString();
++                        readTag = true;
++                    }
++                }
++
++                if (!readTag) {
++                    playerselector_a.handle(this);
++                }
++                // ForkTest end
+                 this.reader.skipWhitespace();
+                 this.suggestions = this::suggestOptionsNextOrClose;
+                 if (!this.reader.canRead()) {
+diff --git a/src/main/java/net/minecraft/server/level/ServerLevel.java b/src/main/java/net/minecraft/server/level/ServerLevel.java
+index 17610196db7a1c6feb2cf74a02479a8691aa323f..cc4868d711779806d6c19413da7d75eb6a7304a7 100644
+--- a/src/main/java/net/minecraft/server/level/ServerLevel.java
++++ b/src/main/java/net/minecraft/server/level/ServerLevel.java
+@@ -1541,6 +1541,26 @@ public class ServerLevel extends Level implements WorldGenLevel {
+         this.getEntities(filter, predicate, result, Integer.MAX_VALUE);
+     }
+ 
++    // ForkTest start
++    public <T extends Entity> void getEntities(EntityTypeTest<Entity, T> filter, Predicate<? super T> predicate, List<? super T> result, int limit, @Nullable String tag) {
++        if (tag != null) {
++            this.getEntities().get(filter, (entity) -> {
++                if (predicate.test(entity)) {
++                    result.add(entity);
++                    if (result.size() >= limit) {
++                        return AbortableIterationConsumer.Continuation.ABORT;
++                    }
++                }
++
++                return AbortableIterationConsumer.Continuation.CONTINUE;
++            }, tag);
++        } else {
++            getEntities(filter, predicate, result, limit);
++        }
++
++    }
++    // ForkTest end
++
+     public <T extends Entity> void getEntities(EntityTypeTest<Entity, T> filter, Predicate<? super T> predicate, List<? super T> result, int limit) {
+         this.getEntities().get(filter, (entity) -> {
+             if (predicate.test(entity)) {
+diff --git a/src/main/java/net/minecraft/world/entity/Entity.java b/src/main/java/net/minecraft/world/entity/Entity.java
+index f20ae9153b7098980ce6c0e75fcbbb4da652661b..b7ab73bf2d65e18de9338ca0c949286620eda94b 100644
+--- a/src/main/java/net/minecraft/world/entity/Entity.java
++++ b/src/main/java/net/minecraft/world/entity/Entity.java
+@@ -632,11 +632,27 @@ public abstract class Entity implements Nameable, EntityAccess, CommandSource {
+     }
+ 
+     public boolean addTag(String tag) {
+-        return this.tags.size() >= 1024 ? false : this.tags.add(tag);
++        // ForkTest start
++        //return this.tags.size() >= 1024 ? false : this.tags.add(tag);
++        boolean added = this.tags.size() >= 1024 ? false : this.tags.add(tag);
++        if (added) {
++            this.level.getEntities().addTag(this, tag);
++        }
++
++        return added;
++        // ForkTest end
+     }
+ 
+     public boolean removeTag(String tag) {
+-        return this.tags.remove(tag);
++        // ForkTest start
++        //return this.tags.remove(tag);
++        boolean removed = this.tags.remove(tag);
++        if (removed) {
++            this.level.getEntities().removeTag(this, tag);
++        }
++
++        return removed;
++        // ForkTest end
+     }
+ 
+     public void kill() {
+@@ -2485,12 +2501,23 @@ public abstract class Entity implements Nameable, EntityAccess, CommandSource {
+                     this.setTicksFrozen(nbt.getInt("TicksFrozen"));
+                     this.hasVisualFire = nbt.getBoolean("HasVisualFire");
+                     if (nbt.contains("Tags", 9)) {
++                        // ForkTest start
++                        for (String tag : this.tags) {
++                            this.level.getEntities().removeTag(this, tag);
++                        }
++                        // ForkTest end
+                         this.tags.clear();
+                         ListTag nbttaglist3 = nbt.getList("Tags", 8);
+                         int i = Math.min(nbttaglist3.size(), 1024);
+ 
+                         for (int j = 0; j < i; ++j) {
+-                            this.tags.add(nbttaglist3.getString(j));
++                            // ForkTest start
++                            //this.tags.add(nbttaglist3.getString(j));
++                            String tag = nbttaglist3.getString(j);
++                            if (this.tags.add(tag)) {
++                                this.level.getEntities().addTag(this, tag);
++                            }
++                            // ForkTest end
+                         }
+                     }
+ 
+diff --git a/src/main/java/net/minecraft/world/level/Level.java b/src/main/java/net/minecraft/world/level/Level.java
+index ea8a0961190e9aafda4fed6fecd85097c141040a..ffec746e5988b649b14e1008a13451164709ec86 100644
+--- a/src/main/java/net/minecraft/world/level/Level.java
++++ b/src/main/java/net/minecraft/world/level/Level.java
+@@ -1521,6 +1521,29 @@ public abstract class Level implements LevelAccessor, AutoCloseable {
+         this.getEntities(filter, box, predicate, result, Integer.MAX_VALUE);
+     }
+ 
++    // ForkTest start
++    public <T extends Entity> void getEntities(EntityTypeTest<Entity, T> filter, AABB box, Predicate<? super T> predicate, List<? super T> result, int limit, @Nullable String tag) {
++        this.getProfiler().incrementCounter("getEntities");
++        // Paper start - optimise this call
++        //TODO use limit
++        if (filter instanceof net.minecraft.world.entity.EntityType entityTypeTest) {
++            ((ServerLevel) this).getEntityLookup().getEntities(entityTypeTest, box, result, predicate, tag);
++        } else {
++            Predicate<? super T> test = (obj) -> {
++                return filter.tryCast(obj) != null;
++            };
++            predicate = predicate == null ? test : test.and((Predicate) predicate);
++            Class base;
++            if (filter == null || (base = filter.getBaseClass()) == null || base == Entity.class) {
++                ((ServerLevel) this).getEntityLookup().getEntities((Entity) null, box, (List) result, (Predicate)predicate, tag);
++            } else {
++                ((ServerLevel) this).getEntityLookup().getEntities(base, null, box, (List) result, (Predicate)predicate, tag); // Paper - optimise this call
++            }
++        }
++        // Paper end - optimise this call
++    }
++    // ForkTest end
++
+     public <T extends Entity> void getEntities(EntityTypeTest<Entity, T> filter, AABB box, Predicate<? super T> predicate, List<? super T> result, int limit) {
+         this.getProfiler().incrementCounter("getEntities");
+         // Paper start - optimise this call
+diff --git a/src/main/java/net/minecraft/world/level/entity/LevelEntityGetter.java b/src/main/java/net/minecraft/world/level/entity/LevelEntityGetter.java
+index d3c3fd2ba799a478f704d5b2bf6ab8d655699169..c5b36a83a5cc4c6d8569a3c7ad54aedd479bbd02 100644
+--- a/src/main/java/net/minecraft/world/level/entity/LevelEntityGetter.java
++++ b/src/main/java/net/minecraft/world/level/entity/LevelEntityGetter.java
+@@ -4,6 +4,7 @@ import java.util.UUID;
+ import java.util.function.Consumer;
+ import javax.annotation.Nullable;
+ import net.minecraft.util.AbortableIterationConsumer;
++import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.phys.AABB;
+ 
+ public interface LevelEntityGetter<T extends EntityAccess> {
+@@ -20,4 +21,12 @@ public interface LevelEntityGetter<T extends EntityAccess> {
+     void get(AABB box, Consumer<T> action);
+ 
+     <U extends T> void get(EntityTypeTest<T, U> filter, AABB box, AbortableIterationConsumer<U> consumer);
++
++    // ForkTest start
++    <U extends T> void get(EntityTypeTest<T, U> filter, AbortableIterationConsumer<U> consumer, String tag);
++
++    void addTag(Entity entity, String tag);
++
++    void removeTag(Entity entity, String tag);
++    // ForkTest end
+ }
